@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: despacho-backend
+  labels:
+    app: despacho-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: despacho-backend
+  template:
+    metadata:
+      labels:
+        app: despacho-backend
+    spec:
+      containers:
+        - name: despacho-backend
+          image: rodribaeza/despacho-backend:latest
+          ports:
+            - containerPort: 8081
+          env:
+            - name: DB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: despacho-db-credentials
+                  key: DB_ENDPOINT
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: despacho-db-credentials
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: despacho-db-credentials
+                  key: DB_NAME
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: despacho-db-credentials
+                  key: DB_USERNAME
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: despacho-db-credentials
+                  key: DB_PASSWORD
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /v3/api-docs
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v3/api-docs
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 20
