@@ -4,9 +4,8 @@
 .idea/
 *.log
 
-# Ignora dependencias locales
+# Ignora dependencias locales (pero .mvn/ SÍ se necesita para el wrapper de Maven)
 target/
-.mvn/
 .settings/
 
 # Ignora control de versiones y sistema de build
