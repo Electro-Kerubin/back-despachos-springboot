@@ -1,4 +1,4 @@
-name: CI/CD - Ventas Backend
+name: CI/CD - Despachos Backend
 
 on:
   push:
@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: rodribaeza/ventas-backend
-  DEPLOYMENT_NAME: ventas-backend
+  IMAGE_NAME: rodribaeza/despacho-backend
+  DEPLOYMENT_NAME: despacho-backend
   NAMESPACE: default
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Ejecutar tests (Mockito unit tests + contextLoads con perfil test/H2)
+      - name: Ejecutar tests (perfil test / H2)
         run: mvn -B test
 
       - name: Compilar y empaquetar (skip tests, ya corrieron)
@@ -39,7 +39,7 @@ jobs:
       - name: Subir jar como artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ventas-backend-jar
+          name: despacho-backend-jar
           path: target/*.jar
           retention-days: 5
 
@@ -97,7 +97,7 @@ jobs:
           proxy_username: ${{ secrets.BASTION_USER }}
           proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "docker-compose.yml"
-          target: "~/smoke-test/ventas-backend"
+          target: "~/smoke-test/despacho-backend"
 
       - name: Levantar contenedor y validar salud
         uses: appleboy/ssh-action@v1.2.0
@@ -110,7 +110,7 @@ jobs:
           proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             set -e
-            cd ~/smoke-test/ventas-backend
+            cd ~/smoke-test/despacho-backend
             export IMAGE_NAME=${{ env.IMAGE_NAME }}
             export IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}
             docker compose pull
@@ -118,7 +118,7 @@ jobs:
             echo "Esperando arranque del contenedor..."
             sleep 20
             # Ajusta el puerto/endpoint según el Dockerfile/application.properties definitivos
-            if curl -sf http://localhost:8080/v3/api-docs > /dev/null; then
+            if curl -sf http://localhost:8081/v3/api-docs > /dev/null; then
               echo "Smoke test OK: la API responde"
             else
               echo "Smoke test FALLÓ, logs del contenedor:"
@@ -147,7 +147,7 @@ jobs:
           proxy_username: ${{ secrets.BASTION_USER }}
           proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "k8s/*"
-          target: "~/deploy/ventas-backend"
+          target: "~/deploy/despacho-backend"
           strip_components: 1
 
       - name: Aplicar manifiestos y actualizar imagen vía SSH
@@ -163,7 +163,7 @@ jobs:
           script: |
             set -e
             aws eks update-kubeconfig --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
-            kubectl apply -f ~/deploy/ventas-backend -n ${{ env.NAMESPACE }}
+            kubectl apply -f ~/deploy/despacho-backend -n ${{ env.NAMESPACE }}
             kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
               ${{ env.DEPLOYMENT_NAME }}=${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }} \
               -n ${{ env.NAMESPACE }}
