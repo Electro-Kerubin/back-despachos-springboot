@@ -1,0 +1,123 @@
+name: CI/CD - Frontend Despacho
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: rodribaeza/despacho-frontend
+  DEPLOYMENT_NAME: despacho-frontend
+  NAMESPACE: default
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Lint & Build (Vite)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      # Etapa "test": el proyecto aún no tiene Vitest/Jest configurado.
+      # Mientras tanto, lint actúa como gate de calidad de código.
+      # TODO: agregar Vitest + pruebas de componentes y reemplazar este paso.
+      - name: Lint
+        run: npm run lint
+
+      - name: Build de producción
+        run: npm run build
+        # Si defines VITE_DESPACHOS_API_URL / VITE_VENTAS_API_URL en Secrets,
+        # descomenta para inyectarlas en build-time:
+        # env:
+        #   VITE_DESPACHOS_API_URL: ${{ secrets.VITE_DESPACHOS_API_URL }}
+        #   VITE_VENTAS_API_URL: ${{ secrets.VITE_VENTAS_API_URL }}
+
+      - name: Subir build como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+          retention-days: 5
+
+  build-and-push:
+    name: Build & Push imagen Docker
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      image_tag: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Generar tag corto (trazabilidad)
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Login en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # build-args:
+          #   VITE_DESPACHOS_API_URL=${{ secrets.VITE_DESPACHOS_API_URL }}
+          #   VITE_VENTAS_API_URL=${{ secrets.VITE_VENTAS_API_URL }}
+
+  deploy:
+    name: Deploy a EKS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Actualizar kubeconfig del clúster EKS
+        run: aws eks update-kubeconfig --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
+
+      - name: Aplicar manifiestos base (Deployment/Service)
+        run: kubectl apply -f k8s/ -n ${{ env.NAMESPACE }}
+
+      - name: Actualizar imagen del Deployment
+        run: |
+          kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
+            ${{ env.DEPLOYMENT_NAME }}=${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }} \
+            -n ${{ env.NAMESPACE }}
+
+      - name: Verificar rollout
+        run: kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} --timeout=180s
