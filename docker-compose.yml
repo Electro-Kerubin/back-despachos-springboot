@@ -1,0 +1,47 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${DB_NAME:-despachos_db}
+      MYSQL_USER: ${DB_USERNAME:-despachos_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-despachos_pass}
+    ports:
+      - "3306:3306"
+    volumes:
+      - despacho-db-data:/var/lib/mysql
+    networks:
+      - despacho-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  despacho-backend:
+    image: ${IMAGE_NAME:-rodribaeza/despacho-backend}:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      DB_ENDPOINT: db
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-despachos_db}
+      DB_USERNAME: ${DB_USERNAME:-despachos_user}
+      DB_PASSWORD: ${DB_PASSWORD:-despachos_pass}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - despacho-net
+
+networks:
+  despacho-net:
+    driver: bridge
+
+volumes:
+  despacho-db-data:
