@@ -1,4 +1,4 @@
-name: CI/CD - Frontend Despacho
+name: CI/CD - Despachos Backend
 
 on:
   push:
@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: rodribaeza/despacho-frontend
-  DEPLOYMENT_NAME: despacho-frontend
+  IMAGE_NAME: rodribaeza/despacho-backend
+  DEPLOYMENT_NAME: despacho-backend
   NAMESPACE: default
 
 permissions:
@@ -17,40 +17,30 @@ permissions:
 
 jobs:
   build-and-test:
-    name: Lint & Build (Vite)
+    name: Build & Test (Maven)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
 
-      - name: Configurar Node.js 20
-        uses: actions/setup-node@v4
+      - name: Configurar JDK 17
+        uses: actions/setup-java@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
 
-      - name: Instalar dependencias
-        run: npm ci
+      - name: Ejecutar tests (perfil test / H2)
+        run: mvn -B test
 
-      # Etapa "test": el proyecto aún no tiene Vitest/Jest configurado.
-      # Mientras tanto, lint actúa como gate de calidad de código.
-      # TODO: agregar Vitest + pruebas de componentes y reemplazar este paso.
-      - name: Lint
-        run: npm run lint
+      - name: Compilar y empaquetar (skip tests, ya corrieron)
+        run: mvn -B package -DskipTests
 
-      - name: Build de producción
-        run: npm run build
-        # Si defines VITE_DESPACHOS_API_URL / VITE_VENTAS_API_URL en Secrets,
-        # descomenta para inyectarlas en build-time:
-        # env:
-        #   VITE_DESPACHOS_API_URL: ${{ secrets.VITE_DESPACHOS_API_URL }}
-        #   VITE_VENTAS_API_URL: ${{ secrets.VITE_VENTAS_API_URL }}
-
-      - name: Subir build como artifact
+      - name: Subir jar como artifact
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-dist
-          path: dist/
+          name: despacho-backend-jar
+          path: target/*.jar
           retention-days: 5
 
   build-and-push:
@@ -87,12 +77,9 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # build-args:
-          #   VITE_DESPACHOS_API_URL=${{ secrets.VITE_DESPACHOS_API_URL }}
-          #   VITE_VENTAS_API_URL=${{ secrets.VITE_VENTAS_API_URL }}
 
-  deploy:
-    name: Deploy a EKS
+  smoke-test:
+    name: Smoke Test en EC2 (docker-compose)
     needs: build-and-push
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
@@ -100,24 +87,72 @@ jobs:
       - name: Checkout código
         uses: actions/checkout@v4
 
-      - name: Configurar credenciales AWS
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Copiar docker-compose.yml al bastion
+        uses: appleboy/scp-action@v0.1.7
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          host: ${{ secrets.HOST_BACK }}
+          username: ${{ secrets.BASTION_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "docker-compose.yml"
+          target: "~/smoke-test/despacho-backend"
 
-      - name: Actualizar kubeconfig del clúster EKS
-        run: aws eks update-kubeconfig --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
+      - name: Levantar contenedor y validar salud
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.HOST_BACK }}
+          username: ${{ secrets.BASTION_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd ~/smoke-test/despacho-backend
+            export IMAGE_NAME=${{ env.IMAGE_NAME }}
+            export IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}
+            docker compose pull
+            docker compose up -d
+            echo "Esperando arranque del contenedor..."
+            sleep 20
+            # Ajusta el puerto/endpoint según el Dockerfile/application.properties definitivos
+            if curl -sf http://localhost:8081/v3/api-docs > /dev/null; then
+              echo "Smoke test OK: la API responde"
+            else
+              echo "Smoke test FALLÓ, logs del contenedor:"
+              docker compose logs
+              docker compose down
+              exit 1
+            fi
+            docker compose down
 
-      - name: Aplicar manifiestos base (Deployment/Service)
-        run: kubectl apply -f k8s/ -n ${{ env.NAMESPACE }}
+  deploy-eks:
+    name: Deploy a EKS (vía bastion SSH)
+    needs: [build-and-push, smoke-test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
 
-      - name: Actualizar imagen del Deployment
-        run: |
-          kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
-            ${{ env.DEPLOYMENT_NAME }}=${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }} \
-            -n ${{ env.NAMESPACE }}
+      - name: Copiar manifiestos k8s/ al bastion
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST_BACK }}
+          username: ${{ secrets.BASTION_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "k8s/*"
+          target: "~/deploy/despacho-backend"
+          strip_components: 1
 
-      - name: Verificar rollout
-        run: kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} --timeout=180s
+      - name: Aplicar manifiestos y actualizar imagen vía SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.HOST_BACK }}
+          username: ${{ secrets.BASTION_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: NAMESPACE,DEPLOYMENT_NAME,IMAGE_NAME
+          script: |
+            set -e
+            aws eks update-kubeconfig --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
+            kubectl apply -f ~/deploy/despacho-backend -n ${{ env.NAMESPACE }}
+            kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
+              ${{ env.DEPLOYMENT_NAME }}=${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }} \
+              -n ${{ env.NAMESPACE }}
+            kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} --timeout=180s
